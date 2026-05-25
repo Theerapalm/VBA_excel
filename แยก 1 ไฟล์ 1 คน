@@ -1,0 +1,160 @@
+Option Explicit
+
+' ============ ONE CLICK: 1 ชีต  1 โฟลเดอร์  1 ไฟล์ (ชื่อเดียวกับชีต) ============
+Sub ExportSheets_OneFilePerFolder()
+    Dim baseFolder As String, wb As Workbook, ws As Worksheet
+    Dim sheetName As String, safeName As String
+    Dim subFolder As String, outPath As String
+    Dim prevScr As Boolean, prevDisp As Boolean
+
+    ' เลือกโฟลเดอร์ปลายทาง
+    baseFolder = PickFolder("เลือกโฟลเดอร์ปลายทาง (ระบบจะสร้างโฟลเดอร์ย่อยตามชื่อชีต)")
+    If Len(baseFolder) = 0 Then Exit Sub
+
+    prevScr = Application.ScreenUpdating
+    prevDisp = Application.DisplayAlerts
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+
+    For Each ws In ThisWorkbook.Worksheets
+        sheetName = ws.Name
+        safeName = CleanPart(sheetName)                   ' ชื่อโฟลเดอร์/ไฟล์ปลอดภัย
+        subFolder = EnsureSlash(baseFolder) & safeName & "\"
+        MkDirDeep subFolder                               ' สร้างโฟลเดอร์ซ้อนลึกได้
+
+        outPath = BuildSafePath(subFolder, CleanPart(GetBaseName(ThisWorkbook.Name) & "_" & sheetName), ".xlsx")
+
+        ' export แบบคงฟอร์แมต/สูตร: copy ชีต  save เป็นไฟล์ใหม่
+        ws.Copy
+        If Not SaveWorkbookSafe(ActiveWorkbook, outPath) Then
+            ' ถ้าเซฟพังทั้งหมด ให้ปิดไฟล์ชั่วคราวทิ้ง
+            On Error Resume Next
+            ActiveWorkbook.Close SaveChanges:=False
+            On Error GoTo 0
+            MsgBox "บันทึกไฟล์ล้มเหลว ลองเลือกปลายทางพาธสั้น ๆ เช่น C:\Export แล้วรันใหม่", vbCritical
+            Exit For
+        End If
+        ActiveWorkbook.Close SaveChanges:=False
+    Next ws
+
+    Application.DisplayAlerts = prevDisp
+    Application.ScreenUpdating = prevScr
+
+    MsgBox "เสร็จสิ้น: สร้าง 1 ไฟล์/1 โฟลเดอร์ ตามจำนวนชีตในเวิร์กบุ๊ก", vbInformation
+End Sub
+
+' -------------------- Helpers (อยู่ในบล็อคเดียวกันนี้) --------------------
+
+Private Function PickFolder(Optional ByVal title As String = "เลือกโฟลเดอร์") As String
+    Dim fd As FileDialog, initPath As String
+    Set fd = Application.FileDialog(msoFileDialogFolderPicker)
+    fd.title = title
+    On Error Resume Next
+    initPath = ThisWorkbook.path
+    On Error GoTo 0
+    If Len(initPath) = 0 Then initPath = Environ$("USERPROFILE") & "\Documents"
+    fd.InitialFileName = EnsureSlash(initPath)
+    If fd.Show = -1 Then
+        PickFolder = fd.SelectedItems(1)
+        If Right$(PickFolder, 1) = "\" Or Right$(PickFolder, 1) = "/" Then _
+            PickFolder = Left$(PickFolder, Len(PickFolder) - 1)
+    Else
+        PickFolder = ""
+    End If
+End Function
+
+Private Function EnsureSlash(ByVal p As String) As String
+    If Right$(p, 1) = "\" Or Right$(p, 1) = "/" Then EnsureSlash = p Else EnsureSlash = p & "\"
+End Function
+
+' สร้างโฟลเดอร์แบบซ้อนลึก (รองรับ UNC)
+Private Sub MkDirDeep(ByVal path As String)
+    Dim parts() As String, i As Long, cur As String
+    If Len(path) = 0 Then Exit Sub
+    path = Replace(path, "/", "\")
+    If Right$(path, 1) = "\" Then path = Left$(path, Len(path) - 1)
+
+    On Error Resume Next
+    If Left$(path, 2) = "\\" Then
+        parts = Split(Mid$(path, 3), "\")
+        If UBound(parts) < 1 Then Exit Sub
+        cur = "\\" & parts(0) & "\" & parts(1) & "\"
+        For i = 2 To UBound(parts)
+            cur = cur & parts(i) & "\"
+            If Len(Dir$(cur, vbDirectory)) = 0 Then MkDir cur
+        Next i
+        Exit Sub
+    End If
+
+    parts = Split(path, "\")
+    cur = parts(0) & "\"
+    For i = 1 To UBound(parts)
+        cur = cur & parts(i) & "\"
+        If Len(Dir$(cur, vbDirectory)) = 0 Then MkDir cur
+    Next i
+    On Error GoTo 0
+End Sub
+
+' ทำความสะอาดชื่อไฟล์/โฟลเดอร์
+Private Function CleanPart(ByVal s As String) As String
+    Dim bad: bad = Array("\", "/", ":", "*", "?", """", "<", ">", "|", vbCr, vbLf, vbTab)
+    Dim i As Long
+    For i = LBound(bad) To UBound(bad): s = Replace(s, CStr(bad(i)), "_"): Next i
+    s = Trim$(s)
+    If Left$(s, 1) = "=" Then s = "_" & Mid$(s, 2)
+    Do While Len(s) > 0 And (Right$(s, 1) = "." Or Right$(s, 1) = " ")
+        s = Left$(s, Len(s) - 1)
+    Loop
+    If Len(s) = 0 Then s = "Unnamed"
+    CleanPart = s
+End Function
+
+' สร้าง path ปลอดภัยและตัดความยาวรวมไม่ให้เกิน ~218 ตัวอักษร
+Private Function BuildSafePath(ByVal folder As String, ByVal fileBase As String, ByVal ext As String) As String
+    Dim head As String, fn As String, full As String, limit As Long, maxNameLen As Long
+    head = EnsureSlash(folder)
+    fn = CleanPart(fileBase) & ext
+    full = head & fn
+    limit = 218
+    If Len(full) > limit Then
+        maxNameLen = limit - Len(head) - Len(ext)
+        If maxNameLen < 10 Then maxNameLen = 10
+        fn = Left$(CleanPart(fileBase), maxNameLen) & ext
+        full = head & fn
+    End If
+    BuildSafePath = full
+End Function
+
+' SaveAs แบบกันพัง: ถ้าพังลองสั้นชื่อ แล้ว fallback ไป TEMP
+Private Function SaveWorkbookSafe(ByVal wb As Workbook, ByVal outPath As String) As Boolean
+    On Error GoTo SAVE_ERR
+    wb.SaveAs Filename:=outPath, FileFormat:=xlOpenXMLWorkbook, Local:=True
+    SaveWorkbookSafe = True
+    Exit Function
+SAVE_ERR:
+    Dim folder As String, fn As String, shortPath As String
+    folder = Left$(outPath, InStrRev(outPath, "\"))
+    fn = Mid$(outPath, InStrRev(outPath, "\") + 1)
+    fn = Left$(fn, 60)
+    If Right$(fn, 5) <> ".xlsx" Then fn = fn & ".xlsx"
+    shortPath = folder & fn
+    On Error GoTo SAVE_ERR2
+    wb.SaveAs Filename:=shortPath, FileFormat:=xlOpenXMLWorkbook, Local:=True
+    SaveWorkbookSafe = True
+    Exit Function
+SAVE_ERR2:
+    Dim tmp As String
+    tmp = Environ$("TEMP") & "\" & Format(Now, "yyyymmdd_hhnnss_") & WorksheetFunction.RandBetween(100, 999) & ".xlsx"
+    On Error GoTo SAVE_ERR3
+    wb.SaveAs Filename:=tmp, FileFormat:=xlOpenXMLWorkbook, Local:=True
+    SaveWorkbookSafe = True
+    MsgBox "บันทึกไปที่ TEMP แทน: " & vbCrLf & tmp, vbExclamation
+    Exit Function
+SAVE_ERR3:
+    SaveWorkbookSafe = False
+End Function
+
+Private Function GetBaseName(ByVal fullName As String) As String
+    Dim p As Long: p = InStrRev(fullName, ".")
+    If p > 0 Then GetBaseName = Left$(fullName, p - 1) Else GetBaseName = fullName
+End Function
