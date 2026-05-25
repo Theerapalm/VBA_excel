@@ -1,0 +1,369 @@
+Option Explicit
+
+' ====== CONFIG ======
+Private Const SENDER_SMTP_V2 As String = "nattaporns@praram9.com"
+Private Const SHEET_NAME_V2 As String = "Sheet1"
+Private Const ROW_START_V2 As Long = 2
+Private Const COL_TO_V2 As Long = 1
+Private Const COL_CC_V2 As Long = 2
+Private Const COL_NAME_V2 As Long = 3
+Private Const COL_ATTACH_V2 As Long = 4
+Private Const TEST_MODE_V2 As Boolean = False ' True=.Display, False=.Send
+
+Private Const HTML_FILE_V2 As String = "body.htm"
+Private Const LOGO_FILE_V2 As String = "mail.png"
+
+' ======= VARIABLES IN EMAIL BODY =======
+Private Const PAY_MONTH_V2 As String = "เมษายน 2569"
+Private Const PAY_NEXT_V2  As String = "พฤษภาคม 2569"
+Private Const DUE_DATE_V2  As String = "14 พฤษภาคม 2569"
+
+'----------------- MAIN -----------------
+Public Sub SendMail_FromSpecificOnly_V2()
+    Dim outApp As Object, acct As Object
+    Dim ws As Worksheet, lastRow As Long, i As Long
+    Dim htmlBody As String, bodyThis As String
+    Dim toAddr As String, ccAddr As String, dispName As String
+    Dim rawPath As String, resolvedPath As String
+    Dim OutMail As Object, attach As Object
+    Dim sentCount As Long, skipCount As Long, errCount As Long
+    Dim msgErr As String, msgInfo As String
+    Dim htmlPath As String, logoPath As String
+
+    ' 1) Load HTML
+    htmlPath = FindSupportFile_V2(HTML_FILE_V2, "")
+    htmlBody = LoadHtmlFile_V2(htmlPath)
+    If Len(htmlBody) = 0 Then
+        MsgBox "ไม่พบ/อ่านไฟล์ HTML ไม่ได้: " & HTML_FILE_V2 & vbCrLf & _
+               "ให้วาง body.htm ไว้โฟลเดอร์เดียวกับไฟล์ Excel หรือในโฟลเดอร์ OneDrive งานส่งเมล", vbCritical
+        Exit Sub
+    End If
+
+    logoPath = FindSupportFile_V2(LOGO_FILE_V2, "pic")
+
+    ' 2) Outlook & Account
+    Set outApp = GetOrCreateOutlook_V2()
+    If outApp Is Nothing Then
+        MsgBox "เปิด Outlook ไม่ได้", vbCritical
+        Exit Sub
+    End If
+
+    Set acct = GetAccountBySmtp_Safe_V2(outApp, SENDER_SMTP_V2)
+    If acct Is Nothing Then
+        MsgBox "Outlook ไม่พบ Account SMTP นี้: " & SENDER_SMTP_V2, vbCritical
+        Exit Sub
+    End If
+
+    ' 3) Worksheet
+    Set ws = ThisWorkbook.Worksheets(SHEET_NAME_V2)
+    lastRow = ws.Cells(ws.Rows.Count, COL_TO_V2).End(xlUp).Row
+    If lastRow < ROW_START_V2 Then
+        MsgBox "ไม่มีข้อมูลในชีต " & SHEET_NAME_V2, vbExclamation
+        Exit Sub
+    End If
+
+    Application.ScreenUpdating = False
+
+    For i = ROW_START_V2 To lastRow
+        On Error GoTo ROW_ERR
+
+        toAddr = NormalizeEmailList_V2(CStr(ws.Cells(i, COL_TO_V2).Value))
+        ccAddr = NormalizeEmailList_V2(CStr(ws.Cells(i, COL_CC_V2).Value))
+        dispName = Trim$(CStr(ws.Cells(i, COL_NAME_V2).Value))
+        rawPath = Replace(Trim$(CStr(ws.Cells(i, COL_ATTACH_V2).Value)), """", "")
+
+        If Len(toAddr) = 0 Or Len(dispName) = 0 Then
+            skipCount = skipCount + 1
+            GoTo NEXT_ROW
+        End If
+
+        ' 4) Build body
+        bodyThis = htmlBody
+        bodyThis = NormalizeHtmlSpaces_V2(bodyThis)
+        bodyThis = Replace(bodyThis, "{NAME}", dispName, , , vbTextCompare)
+        bodyThis = Replace(bodyThis, "{DUE_DATE}", DUE_DATE_V2, , , vbTextCompare)
+        bodyThis = Replace(bodyThis, "{MONTH_THIS}", PAY_MONTH_V2, , , vbTextCompare)
+        bodyThis = Replace(bodyThis, "{MONTH_NEXT}", PAY_NEXT_V2, , , vbTextCompare)
+        bodyThis = ReplaceMonthsPrecisely_V2(bodyThis, PAY_MONTH_V2, PAY_NEXT_V2)
+
+        bodyThis = Replace(bodyThis, "????????????????", "??????????????????", , , vbTextCompare)
+
+        ' 5) Resolve attachment
+        resolvedPath = ResolveAttachmentPath_V2(rawPath, dispName)
+        If Len(resolvedPath) > 0 Then
+            msgInfo = msgInfo & "แถว " & i & " แนบไฟล์: " & resolvedPath & vbCrLf
+        ElseIf Len(rawPath) > 0 Then
+            msgErr = msgErr & "แถว " & i & " หาไฟล์แนบไม่เจอ: " & rawPath & vbCrLf
+        End If
+
+        ' 6) Create mail
+        Set OutMail = outApp.CreateItem(0)
+        With OutMail
+            .SendUsingAccount = acct
+
+            .To = toAddr
+            If Len(ccAddr) > 0 Then .CC = ccAddr
+
+            ' FIX THAI SUBJECT
+            .PropertyAccessor.SetProperty _
+                "http://schemas.microsoft.com/mapi/proptag/0x0037001F", _
+                "ขอยืนยันค่าเวรและค่าล่วงเวลา - " & dispName
+
+            .HTMLBody = bodyThis
+
+            If Len(resolvedPath) > 0 Then .Attachments.Add resolvedPath
+
+            If Len(logoPath) > 0 Then
+                Set attach = .Attachments.Add(logoPath)
+                attach.PropertyAccessor.SetProperty _
+                    "http://schemas.microsoft.com/mapi/proptag/0x3712001F", "MyLogo"
+            End If
+
+            If TEST_MODE_V2 Then
+            .Display
+            Else
+            .Send
+            End If
+        End With
+
+        sentCount = sentCount + 1
+        GoTo NEXT_ROW
+
+ROW_ERR:
+        errCount = errCount + 1
+        msgErr = msgErr & "แถว " & i & ": " & Err.Number & " - " & Err.Description & vbCrLf
+        Err.Clear
+        Resume NEXT_ROW
+
+NEXT_ROW:
+        Set OutMail = Nothing
+        Set attach = Nothing
+    Next i
+
+    Application.ScreenUpdating = True
+
+    Dim summary As String
+    summary = "สรุปการส่ง:" & vbCrLf & _
+              "ส่งแล้ว: " & sentCount & " รายการ" & vbCrLf & _
+              "ข้าม: " & skipCount & " รายการ" & vbCrLf & _
+              "Error: " & errCount & " รายการ"
+    If Len(msgInfo) > 0 Then summary = summary & vbCrLf & vbCrLf & "ไฟล์แนบ:" & vbCrLf & msgInfo
+    If Len(msgErr) > 0 Then summary = summary & vbCrLf & vbCrLf & "รายละเอียด error:" & vbCrLf & msgErr
+    MsgBox summary, IIf(errCount > 0, vbExclamation, vbInformation)
+End Sub
+
+' ---------- Helpers ----------
+Private Function NormalizeEmailList_V2(ByVal value As String) As String
+    Dim s As String
+    s = Trim$(value)
+    s = Replace(s, vbCrLf, ";")
+    s = Replace(s, vbCr, ";")
+    s = Replace(s, vbLf, ";")
+    s = Replace(s, ",", ";")
+    Do While InStr(s, ";;") > 0
+        s = Replace(s, ";;", ";")
+    Loop
+    If Left$(s, 1) = ";" Then s = Mid$(s, 2)
+    If Right$(s, 1) = ";" Then s = Left$(s, Len(s) - 1)
+    NormalizeEmailList_V2 = s
+End Function
+
+Private Function FindSupportFile_V2(ByVal fileName As String, ByVal subFolder As String) As String
+    Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim p As String, root As Variant
+    Dim roots As Collection: Set roots = New Collection
+
+    On Error Resume Next
+    If Len(ThisWorkbook.Path) > 0 Then
+        roots.Add ThisWorkbook.Path
+        If fso.FolderExists(fso.GetParentFolderName(ThisWorkbook.Path)) Then roots.Add fso.GetParentFolderName(ThisWorkbook.Path)
+    End If
+    If Len(Environ$("OneDriveCommercial")) > 0 Then roots.Add Environ$("OneDriveCommercial")
+    If Len(Environ$("OneDrive")) > 0 Then roots.Add Environ$("OneDrive")
+    roots.Add Environ$("USERPROFILE") & "\OneDrive - Praram9 Hospital"
+    On Error GoTo 0
+
+    For Each root In roots
+        If Len(CStr(root)) > 0 Then
+            p = BuildSupportPath_V2(CStr(root), subFolder, fileName)
+            If Len(p) > 0 Then
+                FindSupportFile_V2 = p
+                Exit Function
+            End If
+
+            p = FindInMailFolderWildcard_V2(CStr(root), subFolder, fileName)
+            If Len(p) > 0 Then
+                FindSupportFile_V2 = p
+                Exit Function
+            End If
+        End If
+    Next root
+End Function
+
+Private Function BuildSupportPath_V2(ByVal baseFolder As String, ByVal subFolder As String, ByVal fileName As String) As String
+    Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim p As String
+
+    If Len(subFolder) > 0 Then
+        p = fso.BuildPath(fso.BuildPath(baseFolder, subFolder), fileName)
+    Else
+        p = fso.BuildPath(baseFolder, fileName)
+    End If
+
+    If fso.FileExists(p) Then BuildSupportPath_V2 = p
+End Function
+
+Private Function FindInMailFolderWildcard_V2(ByVal oneDriveRoot As String, ByVal subFolder As String, ByVal fileName As String) As String
+    Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim folderName As String, basePath As String, p As String
+
+    If Not fso.FolderExists(oneDriveRoot) Then Exit Function
+
+    folderName = Dir(fso.BuildPath(oneDriveRoot, "8.*mix"), vbDirectory)
+    Do While Len(folderName) > 0
+        If folderName <> "." And folderName <> ".." Then
+            basePath = fso.BuildPath(oneDriveRoot, folderName)
+            If (GetAttr(basePath) And vbDirectory) = vbDirectory Then
+                p = BuildSupportPath_V2(basePath, subFolder, fileName)
+                If Len(p) > 0 Then
+                    FindInMailFolderWildcard_V2 = p
+                    Exit Function
+                End If
+            End If
+        End If
+        folderName = Dir()
+    Loop
+End Function
+
+Private Function ResolveAttachmentPath_V2(ByVal rawPath As String, ByVal displayName As String) As String
+    Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
+    On Error Resume Next
+
+    If Len(rawPath) = 0 Then Exit Function
+
+    If fso.FileExists(rawPath) Then
+        ResolveAttachmentPath_V2 = rawPath
+        Exit Function
+    End If
+
+    If fso.FolderExists(rawPath) Then
+        Dim folder As Object, f As Object, onlyXlsx As String, cnt As Long
+        Set folder = fso.GetFolder(rawPath)
+
+        Dim try1 As String
+        try1 = fso.BuildPath(rawPath, displayName & ".xlsx")
+        If fso.FileExists(try1) Then
+            ResolveAttachmentPath_V2 = try1
+            Exit Function
+        End If
+
+        cnt = 0: onlyXlsx = ""
+        For Each f In folder.Files
+            If LCase$(fso.GetExtensionName(f.Path)) = "xlsx" Then
+                cnt = cnt + 1
+                onlyXlsx = f.Path
+            End If
+        Next f
+        If cnt = 1 Then
+            ResolveAttachmentPath_V2 = onlyXlsx
+            Exit Function
+        End If
+
+        If cnt > 1 Then
+            For Each f In folder.Files
+                If LCase$(fso.GetExtensionName(f.Path)) = "xlsx" Then
+                    If InStr(1, fso.GetBaseName(f.Path), displayName, vbTextCompare) > 0 Then
+                        ResolveAttachmentPath_V2 = f.Path
+                        Exit Function
+                    End If
+                End If
+            Next f
+        End If
+    End If
+End Function
+
+Private Function LoadHtmlFile_V2(ByVal path As String) As String
+    On Error GoTo FAIL
+    If Dir(path) = "" Then Exit Function
+    Dim stm As Object: Set stm = CreateObject("ADODB.Stream")
+    stm.Type = 2: stm.Charset = "utf-8": stm.Open
+    stm.LoadFromFile path
+    LoadHtmlFile_V2 = stm.ReadText
+    stm.Close
+    Exit Function
+FAIL:
+    LoadHtmlFile_V2 = vbNullString
+End Function
+
+Private Function GetOrCreateOutlook_V2() As Object
+    On Error Resume Next
+    Set GetOrCreateOutlook_V2 = GetObject(, "Outlook.Application")
+    If GetOrCreateOutlook_V2 Is Nothing Then Set GetOrCreateOutlook_V2 = CreateObject("Outlook.Application")
+End Function
+
+Private Function ReplaceMonthsPrecisely_V2(ByVal body As String, ByVal monthThis As String, ByVal monthNext As String) As String
+    Dim posWillPay As Long
+    Dim p1s As Long, p1e As Long
+    Dim p2s As Long, p2e As Long
+    Dim NBSP As String: NBSP = ChrW(160)
+
+    If InStr(1, body, "<strong>", vbTextCompare) = 0 Then
+        body = Replace(body, "??????? ", "??????? <strong>", , , vbTextCompare)
+        body = Replace(body, "???????????????? ", "</strong>???????????????? <strong>", , , vbTextCompare)
+        body = Replace(body, "<br>", "</strong><br>", , , vbTextCompare)
+        body = Replace(body, "<br/>", "</strong><br/>", , , vbTextCompare)
+    End If
+
+    posWillPay = InStr(1, body, "????????????????", vbTextCompare)
+    If posWillPay = 0 Then
+        ReplaceMonthsPrecisely_V2 = body
+        Exit Function
+    End If
+
+    p1s = InStrRev(body, "<strong>", posWillPay, vbTextCompare)
+    p1e = InStr(p1s + 8, body, "</strong>", vbTextCompare)
+    If p1s > 0 And p1e > p1s Then
+        body = Left$(body, p1s + 7) & monthThis & Mid$(body, p1e)
+    End If
+
+    p2s = InStr(posWillPay, body, "<strong>", vbTextCompare)
+    p2e = InStr(p2s + 8, body, "</strong>", vbTextCompare)
+    If p2s > 0 And p2e > p2s Then
+        body = Left$(body, p2s + 7) & monthNext & Mid$(body, p2e)
+    End If
+
+    body = Replace(body, "&nbsp;", " ", , , vbTextCompare)
+    body = Replace(body, NBSP, " ")
+
+    ReplaceMonthsPrecisely_V2 = body
+End Function
+
+Private Function NormalizeHtmlSpaces_V2(ByVal s As String) As String
+    Dim NBSP As String: NBSP = ChrW(160)
+    s = Replace(s, "&nbsp;", " ", , , vbTextCompare)
+    s = Replace(s, NBSP, " ")
+    NormalizeHtmlSpaces_V2 = s
+End Function
+
+Private Function GetAccountBySmtp_Safe_V2(ByVal outApp As Object, ByVal smtp As String) As Object
+    Dim accs As Object, a As Object, i As Long, addr As String
+    If Len(Trim$(smtp)) = 0 Then Exit Function
+
+    On Error Resume Next
+    Set accs = outApp.Session.Accounts
+    On Error GoTo 0
+    If accs Is Nothing Then Exit Function
+
+    For i = 1 To accs.Count
+        Set a = accs.Item(i)
+        On Error Resume Next
+        addr = a.SmtpAddress
+        If Len(addr) = 0 Then addr = a.PropertyAccessor.GetProperty("http://schemas.microsoft.com/mapi/proptag/0x39FE001E")
+        On Error GoTo 0
+
+        If LCase$(addr) = LCase$(smtp) Then
+            Set GetAccountBySmtp_Safe_V2 = a
+            Exit Function
+        End If
+    Next i
+End Function
